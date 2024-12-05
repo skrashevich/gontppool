@@ -276,7 +276,7 @@ func newNtpServer(localAddrs []string, downstreamAddrs []string, debug bool) *Nt
 			Control: func(network, address string, c syscall.RawConn) error {
 				var serr error
 				err := c.Control(func(fd uintptr) {
-					serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
+					serr = SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
 				})
 				if err != nil {
 					return err
@@ -592,7 +592,7 @@ func absF(f float64) float64 {
 
 func dropPrivileges(userName, chrootDir string) error {
 	if chrootDir != "" && chrootDir != "/" {
-		if err := syscall.Chroot(chrootDir); err != nil {
+		if err := Chroot(chrootDir); err != nil {
 			return fmt.Errorf("failed to chroot: %v", err)
 		}
 		if err := os.Chdir("/"); err != nil {
@@ -606,10 +606,10 @@ func dropPrivileges(userName, chrootDir string) error {
 		}
 		uid, _ := strconv.Atoi(u.Uid)
 		gid, _ := strconv.Atoi(u.Gid)
-		if err := syscall.Setgid(gid); err != nil {
+		if err := Setgid(gid); err != nil {
 			return fmt.Errorf("failed to setgid: %v", err)
 		}
-		if err := syscall.Setuid(uid); err != nil {
+		if err := Setuid(uid); err != nil {
 			return fmt.Errorf("failed to setuid: %v", err)
 		}
 	}
