@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go build -ldfl
 
 # Step 2: Runtime Stage
 # Use a lightweight distroless image
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static-debian12:latest
 
 # Set non-root user for execution
 USER nonroot:nonroot
@@ -37,4 +37,4 @@ COPY --from=builder /build/gontppool /gontppool
 EXPOSE 123/udp
 
 # Command to run the NTP server
-CMD ["/gontppool"]
+ENTRYPOINT ["/gontppool"]
