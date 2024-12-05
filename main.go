@@ -402,21 +402,21 @@ func parseNtpPacket(buf []byte, addr *net.UDPAddr, localTS NtpTimestamp) (*NtpPa
 	return p, nil
 }
 
-// updateDownstreams – функция, которая периодически проверяет доступность downstream-серверов
+// updateDownstreams – periodically check downstream-servers availability
 func (server *NtpServer) updateDownstreams() {
 	for {
-		// Проверим каждый сервер
+		// check every server
 		for _, ds := range server.downstreams {
 			ds.available = server.checkServer(ds.addr)
 			if server.debug {
 				fmt.Printf("Check server %s: available=%v\n", ds.addr.String(), ds.available)
 			}
 		}
-		time.Sleep(5 * time.Second) // Проверяем доступность каждые 5 секунд
+		time.Sleep(5 * time.Second)
 	}
 }
 
-// checkServer – отправляет запрос к downstream-серверу и проверяет, пришёл ли корректный ответ
+// checkServer – send query to downstream-server and check answer
 func (server *NtpServer) checkServer(addr *net.UDPAddr) bool {
 	request := newRequest(addr)
 
@@ -447,11 +447,11 @@ func (server *NtpServer) checkServer(addr *net.UDPAddr) bool {
 	for {
 		n, raddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			// Нет ответа
+			// no answer
 			return false
 		}
 		if n < 48 {
-			// Пакет слишком короткий, пропустим
+			// too short
 			continue
 		}
 
@@ -467,8 +467,8 @@ func (server *NtpServer) checkServer(addr *net.UDPAddr) bool {
 }
 
 func (server *NtpServer) updateState() {
-	// Теперь нам нужно получать состояние не с одного сервера, а с доступных downstream-серверов.
-	// Можно взять первое доступное состояние или объединить. Для простоты возьмём первое доступное.
+	// Now we need to get the state not from a single server, but from available downstream servers.
+	// We can take the first available state or combine them. For simplicity, we'll take the first available one.
 	var newState *NtpServerState
 
 	for _, ds := range server.downstreams {
@@ -543,7 +543,7 @@ func (server *NtpServer) run() {
 	var wg sync.WaitGroup
 	var threadID uint32 = 0
 
-	// Запускаем процессинг запросов
+	// run pool
 	for _, conn := range server.conns {
 		threadID++
 		c := conn
@@ -554,10 +554,8 @@ func (server *NtpServer) run() {
 		}(threadID)
 	}
 
-	// Запускаем горутину, которая периодически проверяет downstream-серверы
 	go server.updateDownstreams()
 
-	// В основном цикле обновляем состояние, опираясь на доступные downstream-серверы
 	for {
 		server.updateState()
 		time.Sleep(time.Second)
@@ -565,7 +563,7 @@ func (server *NtpServer) run() {
 }
 
 func printUsage() {
-	fmt.Println("Usage: go-ntp [OPTIONS]")
+	fmt.Println("Usage: gontppool [OPTIONS]")
 	fmt.Println("Options:")
 	fmt.Println("  -4 NUM        set number of IPv4 server threads (default 1)")
 	fmt.Println("  -6 NUM        set number of IPv6 server threads (default 1)")

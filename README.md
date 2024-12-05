@@ -18,15 +18,15 @@ This program is a Go implementation an NTP server. It listens for incoming NTP r
 3. Run `go build` to compile the binary.
 
 ```bash
-go build -o go-ntp
+go build -o gontppool
 ```
 
-4. You will get an executable named `go-ntp`.
+4. You will get an executable named `gontppool`.
 
 ## Usage
 
 ```bash
-./go-ntp [OPTIONS]
+./gontppool [OPTIONS]
 ```
 
 ### Available Options
@@ -48,7 +48,7 @@ go build -o go-ntp
   This option can be repeated multiple times to provide multiple servers.  
   Example:
   ```bash
-  ./go-ntp -s 127.0.0.1:11123 -s ntp.example.org:123 -s 192.168.0.10:9999
+  ./gontppool -s 127.0.0.1:11123 -s ntp.example.org:123 -s 192.168.0.10:9999
   ```
   
   The server will periodically check each upstream server for availability and update its reference time state from any that respond correctly.
@@ -68,10 +68,56 @@ go build -o go-ntp
 ## Example Invocation
 
 ```bash
-sudo ./go-ntp -a 0.0.0.0:123 -b [::]:123 -s 127.0.0.1:11123 -s time.google.com:123 -d
+sudo ./gontppool -a 0.0.0.0:123 -b [::]:123 -s 127.0.0.1:11123 -s time.google.com:123 -d
 ```
 
 In this example, the server listens on all IPv4 and IPv6 addresses on port 123, queries `127.0.0.1:11123` and `time.google.com:123` as upstream servers, and prints debug messages to the console.
+
+
+
+## Running in Docker
+
+### Build the Docker Image
+
+The project includes a multi-stage Dockerfile for building and running the server in a lightweight container.
+
+1. Clone this repository and navigate to the directory.
+2. Build the Docker image:
+
+```bash
+docker build -t gontppool .
+```
+
+### Running the Container
+
+You can run the NTP server in a container as follows:
+
+```bash
+docker run --rm --name gontppool   -p 123:123/udp   gontppool -a 0.0.0.0:123 -s 127.0.0.1:11123 -s time.google.com:123
+```
+
+This command:
+- Maps port `123` on the host to port `123` in the container (UDP traffic).
+- Starts the server with local binding to `0.0.0.0:123` and uses two upstream servers.
+
+### Multi-Architecture Support
+
+If you want to use the pre-built Docker image for multiple architectures (e.g., `amd64`, `arm64`), use Docker Buildx:
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 -t your-dockerhub-username/gontppool:latest --push .
+```
+
+Replace `your-dockerhub-username/gontppool` with your Docker Hub repository or private registry path.
+
+### Pulling a Pre-Built Image
+
+If you have pushed the image to a container registry, you can pull and run it as follows:
+
+```bash
+docker pull skrashevich/gontppool:latest
+docker run --rm --name gontppool -p 123:123/udp skrashevich/gontppool:latest -s time.google.com:123
+```
 
 ## Notes
 
