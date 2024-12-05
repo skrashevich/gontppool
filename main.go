@@ -1,10 +1,6 @@
-// Перевод кода из Rust в Go
-// Авторские права аналогичны исходным условиям (GNU GPLv2 или новее).
-
 package main
 
 import (
-	//"bytes"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -13,23 +9,20 @@ import (
 	"os"
 	"os/user"
 	"strconv"
-	//"strings"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-// NtpTimestamp соответствует 64-битному NTP временному формату: сек<<32 | фракции
 type NtpTimestamp struct {
 	ts uint64
 }
 
 func ntpNow() NtpTimestamp {
 	now := time.Now().UTC()
-	// Эпоха NTP начинается с 1900 года
 	secs := uint64(now.Unix() + 2208988800)
 	nanos := now.Nanosecond()
-	// Фракции секунды: nanos * (2^32 / 1_000_000_000)
 	frac := uint64(float64(nanos) * 4.294967296)
 	return NtpTimestamp{ts: (secs << 32) + frac}
 }
@@ -43,7 +36,6 @@ func ntpRandom() NtpTimestamp {
 }
 
 func (t NtpTimestamp) diffToSec(u NtpTimestamp) float64 {
-	// 2^32 = 4294967296.0
 	diff := int64(t.ts - u.ts)
 	return float64(diff) / 4294967296.0
 }
@@ -60,7 +52,6 @@ func (t NtpTimestamp) equals(other NtpTimestamp) bool {
 	return t.ts == other.ts
 }
 
-// NtpFracValue хранит 32-битную дробную часть
 type NtpFracValue struct {
 	val uint32
 }
@@ -81,7 +72,6 @@ func (f *NtpFracValue) increment() {
 	f.val += 1
 }
 
-// NtpPacket – структура для хранения NTP пакетов
 type NtpPacket struct {
 	remoteAddr net.Addr
 	localTS    NtpTimestamp
@@ -256,15 +246,20 @@ func (p *NtpPacket) getServerState() NtpServerState {
 	}
 }
 
+type downstreamServer struct {
+	addr      *net.UDPAddr
+	available bool
+}
+
 type NtpServer struct {
 	state       *sync.Mutex
 	sharedState *NtpServerState
 	conns       []*net.UDPConn
-	serverAddr  string
+	downstreams []*downstreamServer
 	debug       bool
 }
 
-func newNtpServer(localAddrs []string, serverAddr string, debug bool) *NtpServer {
+func newNtpServer(localAddrs []string, downstreamAddrs []string, debug bool) *NtpServer {
 	s := &NtpServerState{
 		leap:       0,
 		stratum:    0,
@@ -277,17 +272,10 @@ func newNtpServer(localAddrs []string, serverAddr string, debug bool) *NtpServer
 
 	var conns []*net.UDPConn
 	for _, a := range localAddrs {
-		udpAddr, err := net.ResolveUDPAddr("udp", a)
-		if err != nil {
-			panic(fmt.Sprintf("Couldn't parse address %s: %v", a, err))
-		}
-		// ReusePort аналог в Go - с 1.11 можно использовать socket options через пакет syscall
-		// Здесь просто bind без reuse_port (Go сам не имеет прямой опции reuse_port, можно пробовать через Control при ListenConfig)
 		lc := net.ListenConfig{
 			Control: func(network, address string, c syscall.RawConn) error {
 				var serr error
 				err := c.Control(func(fd uintptr) {
-					// Попытка включить SO_REUSEPORT
 					serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEPORT, 1)
 				})
 				if err != nil {
@@ -297,7 +285,7 @@ func newNtpServer(localAddrs []string, serverAddr string, debug bool) *NtpServer
 			},
 		}
 
-		conn, err := lc.ListenPacket(nil, "udp", udpAddr.AddrPort().String())
+		conn, err := lc.ListenPacket(nil, "udp", a)
 		if err != nil {
 			panic(fmt.Sprintf("Couldn't bind socket: %v", err))
 		}
@@ -309,11 +297,24 @@ func newNtpServer(localAddrs []string, serverAddr string, debug bool) *NtpServer
 		conns = append(conns, udpConn)
 	}
 
+	var downstreams []*downstreamServer
+	for _, ds := range downstreamAddrs {
+		addr, err := net.ResolveUDPAddr("udp", ds)
+		if err != nil {
+			fmt.Printf("Warning: invalid downstream server address %s: %v\n", ds, err)
+			continue
+		}
+		downstreams = append(downstreams, &downstreamServer{
+			addr:      addr,
+			available: false,
+		})
+	}
+
 	return &NtpServer{
 		state:       &sync.Mutex{},
 		sharedState: s,
 		conns:       conns,
-		serverAddr:  serverAddr,
+		downstreams: downstreams,
 		debug:       debug,
 	}
 }
@@ -334,13 +335,17 @@ func (server *NtpServer) processRequests(threadID uint32, conn *net.UDPConn) {
 
 		localTS := ntpNow()
 		if n < 48 {
-			fmt.Printf("Thread #%d: packet too short\n", threadID)
+			if server.debug {
+				fmt.Printf("Thread #%d: packet too short\n", threadID)
+			}
 			continue
 		}
 
 		packet, err := parseNtpPacket(buf[:n], addr, localTS)
 		if err != nil {
-			fmt.Printf("Thread #%d: parse error: %v\n", threadID, err)
+			if server.debug {
+				fmt.Printf("Thread #%d: parse error: %v\n", threadID, err)
+			}
 			continue
 		}
 
@@ -397,17 +402,24 @@ func parseNtpPacket(buf []byte, addr *net.UDPAddr, localTS NtpTimestamp) (*NtpPa
 	return p, nil
 }
 
-func (server *NtpServer) updateState() {
-	addr, err := net.ResolveUDPAddr("udp", server.serverAddr)
-	if err != nil {
-		fmt.Printf("Failed to resolve server address %s: %v\n", server.serverAddr, err)
-		return
+// updateDownstreams – функция, которая периодически проверяет доступность downstream-серверов
+func (server *NtpServer) updateDownstreams() {
+	for {
+		// Проверим каждый сервер
+		for _, ds := range server.downstreams {
+			ds.available = server.checkServer(ds.addr)
+			if server.debug {
+				fmt.Printf("Check server %s: available=%v\n", ds.addr.String(), ds.available)
+			}
+		}
+		time.Sleep(5 * time.Second) // Проверяем доступность каждые 5 секунд
 	}
+}
 
+// checkServer – отправляет запрос к downstream-серверу и проверяет, пришёл ли корректный ответ
+func (server *NtpServer) checkServer(addr *net.UDPAddr) bool {
 	request := newRequest(addr)
-	var newState *NtpServerState
 
-	// Создадим локальный временный сокет для отправки запроса
 	laddr := &net.UDPAddr{
 		IP:   net.IPv4zero,
 		Port: 0,
@@ -415,56 +427,108 @@ func (server *NtpServer) updateState() {
 
 	conn, err := net.ListenUDP("udp", laddr)
 	if err != nil {
-		fmt.Printf("Client failed to listen UDP: %v\n", err)
-		return
+		if server.debug {
+			fmt.Printf("CheckServer: failed to listen UDP: %v\n", err)
+		}
+		return false
 	}
 	defer conn.Close()
 
 	conn.SetDeadline(time.Now().Add(1 * time.Second))
 
 	if err := request.send(conn); err != nil {
-		fmt.Printf("Client failed to send packet: %v\n", err)
-		return
-	}
-
-	if server.debug {
-		fmt.Printf("Client sent %+v\n", request)
+		if server.debug {
+			fmt.Printf("CheckServer: failed to send packet: %v\n", err)
+		}
+		return false
 	}
 
 	buf := make([]byte, 1024)
-loopResponse:
 	for {
 		n, raddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			if server.debug {
-				fmt.Printf("Client failed to receive packet: %v\n", err)
-			}
-			break loopResponse
+			// Нет ответа
+			return false
 		}
 		if n < 48 {
-			fmt.Printf("Client received too short packet\n")
+			// Пакет слишком короткий, пропустим
 			continue
 		}
 
 		localTS := ntpNow()
 		resp, err := parseNtpPacket(buf[:n], raddr, localTS)
 		if err != nil {
-			fmt.Printf("Client parse error: %v\n", err)
 			continue
 		}
-
-		if server.debug {
-			fmt.Printf("Client received %+v\n", resp)
+		if resp.isValidResponse(request) {
+			return true
 		}
+	}
+}
 
-		if !resp.isValidResponse(request) {
-			fmt.Printf("Client received unexpected response: %+v\n", resp)
-			continue
+func (server *NtpServer) updateState() {
+	// Теперь нам нужно получать состояние не с одного сервера, а с доступных downstream-серверов.
+	// Можно взять первое доступное состояние или объединить. Для простоты возьмём первое доступное.
+	var newState *NtpServerState
+
+	for _, ds := range server.downstreams {
+		if ds.available {
+			request := newRequest(ds.addr)
+			laddr := &net.UDPAddr{
+				IP:   net.IPv4zero,
+				Port: 0,
+			}
+			conn, err := net.ListenUDP("udp", laddr)
+			if err != nil {
+				if server.debug {
+					fmt.Printf("Client failed to listen UDP: %v\n", err)
+				}
+				continue
+			}
+			conn.SetDeadline(time.Now().Add(1 * time.Second))
+
+			if err := request.send(conn); err != nil {
+				conn.Close()
+				continue
+			}
+
+			if server.debug {
+				fmt.Printf("Client sent request to %s: %+v\n", ds.addr.String(), request)
+			}
+
+			buf := make([]byte, 1024)
+		readLoop:
+			for {
+				n, raddr, err := conn.ReadFromUDP(buf)
+				if err != nil {
+					break readLoop
+				}
+				if n < 48 {
+					continue
+				}
+				localTS := ntpNow()
+				resp, err := parseNtpPacket(buf[:n], raddr, localTS)
+				if err != nil {
+					continue
+				}
+				if server.debug {
+					fmt.Printf("Client received from %s: %+v\n", ds.addr.String(), resp)
+				}
+				if resp.isValidResponse(request) {
+					s := resp.getServerState()
+					newState = &s
+					break readLoop
+				}
+			}
+			conn.Close()
+
+			if newState != nil {
+				break
+			}
 		}
-
-		s := resp.getServerState()
-		newState = &s
-		break
+		if newState != nil {
+			break
+		}
 	}
 
 	server.state.Lock()
@@ -472,7 +536,6 @@ loopResponse:
 	if newState != nil {
 		*server.sharedState = *newState
 	}
-
 	server.sharedState.dispersion.increment()
 }
 
@@ -480,6 +543,7 @@ func (server *NtpServer) run() {
 	var wg sync.WaitGroup
 	var threadID uint32 = 0
 
+	// Запускаем процессинг запросов
 	for _, conn := range server.conns {
 		threadID++
 		c := conn
@@ -490,6 +554,10 @@ func (server *NtpServer) run() {
 		}(threadID)
 	}
 
+	// Запускаем горутину, которая периодически проверяет downstream-серверы
+	go server.updateDownstreams()
+
+	// В основном цикле обновляем состояние, опираясь на доступные downstream-серверы
 	for {
 		server.updateState()
 		time.Sleep(time.Second)
@@ -499,9 +567,22 @@ func (server *NtpServer) run() {
 func printUsage() {
 	fmt.Println("Usage: go-ntp [OPTIONS]")
 	fmt.Println("Options:")
-	flag.PrintDefaults()
+	fmt.Println("  -4 NUM        set number of IPv4 server threads (default 1)")
+	fmt.Println("  -6 NUM        set number of IPv6 server threads (default 1)")
+	fmt.Println("  -a ADDR:PORT  set local address of IPv4 server sockets (default 0.0.0.0:123)")
+	fmt.Println("  -b ADDR:PORT  set local address of IPv6 server sockets (default [::]:123)")
+	fmt.Println("  -s ADDR:PORT  set one or more upstream NTP server addresses. Can be repeated multiple times.")
+	fmt.Println("                Example: -s 127.0.0.1:11123 -s 192.168.0.10:12345")
+	fmt.Println("  -u USER       run as specified USER after binding sockets")
+	fmt.Println("  -r DIR        change root directory to DIR (chroot)")
+	fmt.Println("  -d            enable debug messages")
+	fmt.Println("  -h            print this help message")
+	fmt.Println("")
+	fmt.Println("This NTP server listens on the specified local addresses and ports, serves NTP requests,")
+	fmt.Println("and periodically queries upstream NTP servers to update its reference time state.")
+	fmt.Println("Multiple upstream servers can be specified with multiple -s flags; the server will only")
+	fmt.Println("use those that respond successfully.")
 }
-
 func absF(f float64) float64 {
 	if f < 0 {
 		return -f
@@ -510,8 +591,6 @@ func absF(f float64) float64 {
 }
 
 func dropPrivileges(userName, chrootDir string) error {
-	// Понижение привилегий (аналог privdrop) в Go требует ручного вызова системных функций.
-	// Предполагается, что процесс запущен с достаточными привилегиями для chroot/сетевого доступа.
 	if chrootDir != "" && chrootDir != "/" {
 		if err := syscall.Chroot(chrootDir); err != nil {
 			return fmt.Errorf("failed to chroot: %v", err)
@@ -544,18 +623,25 @@ func main() {
 		ipv6Threads = flag.Int("6", 1, "number of IPv6 server threads")
 		ipv4Addr    = flag.String("a", "0.0.0.0:123", "IPv4 server address")
 		ipv6Addr    = flag.String("b", "[::]:123", "IPv6 server address")
-		serverAddr  = flag.String("s", "127.0.0.1:11123", "upstream server address")
-		userName    = flag.String("u", "", "run as USER")
-		rootDir     = flag.String("r", "", "chroot directory")
-		debugFlag   = flag.Bool("d", false, "enable debug messages")
-		helpFlag    = flag.Bool("h", false, "print help")
+		// Вместо одного сервера теперь можно указать несколько с помощью повторения флага -s
+		servers   multiStringFlag
+		userName  = flag.String("u", "", "run as USER")
+		rootDir   = flag.String("r", "", "chroot directory")
+		debugFlag = flag.Bool("d", false, "enable debug messages")
+		helpFlag  = flag.Bool("h", false, "print help")
 	)
 
+	flag.Var(&servers, "s", "upstream server address (can be repeated)")
 	flag.Parse()
 
 	if *helpFlag {
 		printUsage()
 		return
+	}
+
+	if len(servers) == 0 {
+		// Если не указано ни одного сервера, используем по умолчанию
+		servers = append(servers, "127.0.0.1:11123")
 	}
 
 	var addrs []string
@@ -566,9 +652,8 @@ func main() {
 		addrs = append(addrs, *ipv6Addr)
 	}
 
-	server := newNtpServer(addrs, *serverAddr, *debugFlag)
+	server := newNtpServer(addrs, servers, *debugFlag)
 
-	// Применение понижения привилегий, если указано
 	if (*rootDir != "") || (*userName != "") {
 		if err := dropPrivileges(*userName, *rootDir); err != nil {
 			panic(fmt.Sprintf("Couldn't drop privileges: %v", err))
@@ -576,4 +661,16 @@ func main() {
 	}
 
 	server.run()
+}
+
+// multiStringFlag для возможности указания флага -s несколько раз
+type multiStringFlag []string
+
+func (m *multiStringFlag) String() string {
+	return strings.Join(*m, ",")
+}
+
+func (m *multiStringFlag) Set(value string) error {
+	*m = append(*m, value)
+	return nil
 }
